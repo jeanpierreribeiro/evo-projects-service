@@ -7,6 +7,7 @@ import { tasksRoutes } from './routes/tasks.routes.js';
 import { dashboardRoutes } from './routes/dashboard.routes.js';
 import { inboxRoutes } from './routes/inbox.routes.js';
 import { publicRoutes } from './routes/public.routes.js';
+import { mcpRoutes } from './routes/mcp.routes.js';
 
 export function buildApp() {
   const app = fastify({
@@ -35,6 +36,9 @@ export function buildApp() {
     async (api) => {
       // Public routes (Client validation portal)
       api.register(publicRoutes);
+
+      // MCP Server routes for AI and Bot Runtime
+      api.register(mcpRoutes);
 
       // Authenticated routes
       api.register(workspacesRoutes);
