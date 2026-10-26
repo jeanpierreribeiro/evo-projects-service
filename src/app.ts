@@ -1,5 +1,12 @@
 import fastify from 'fastify';
 import cors from '@fastify/cors';
+import { workspacesRoutes } from './routes/workspaces.routes.js';
+import { projectsRoutes } from './routes/projects.routes.js';
+import { columnsRoutes } from './routes/columns.routes.js';
+import { tasksRoutes } from './routes/tasks.routes.js';
+import { dashboardRoutes } from './routes/dashboard.routes.js';
+import { inboxRoutes } from './routes/inbox.routes.js';
+import { publicRoutes } from './routes/public.routes.js';
 
 export function buildApp() {
   const app = fastify({
@@ -26,9 +33,16 @@ export function buildApp() {
   // API v1 prefix
   app.register(
     async (api) => {
-      api.get('/ping', async () => {
-        return { message: 'evo-projects-service active' };
-      });
+      // Public routes (Client validation portal)
+      api.register(publicRoutes);
+
+      // Authenticated routes
+      api.register(workspacesRoutes);
+      api.register(dashboardRoutes);
+      api.register(inboxRoutes);
+      api.register(projectsRoutes);
+      api.register(columnsRoutes);
+      api.register(tasksRoutes);
     },
     { prefix: '/api/v1/projects' }
   );
