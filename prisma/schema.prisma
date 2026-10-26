@@ -1,0 +1,296 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkspaceRole {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum Priority {
+  NONE
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum RelationType {
+  BLOCKS
+  BLOCKED_BY
+  RELATES_TO
+}
+
+enum ApprovalStatus {
+  NONE
+  PENDING
+  APPROVED
+  CHANGES_REQUESTED
+}
+
+model Workspace {
+  id          String            @id @default(cuid())
+  name        String
+  slug        String            @unique
+  description String?
+  color       String?           @default("#3b82f6")
+  avatarUrl   String?
+  members     WorkspaceMember[]
+  projects    Project[]
+  activities  Activity[]
+  notifications Notification[]
+  tasks       Task[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String        // User ID from evo-auth / jprOS
+  email       String
+  name        String
+  avatarUrl   String?
+  role        WorkspaceRole @default(MEMBER)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+model Project {
+  id           String        @id @default(cuid())
+  workspaceId  String
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name         String
+  slug         String
+  description  String?
+  color        String?       @default("#6366f1")
+  icon         String?       @default("folder")
+  isArchived   Boolean       @default(false)
+  columns      Column[]
+  tasks        Task[]
+  customFields CustomField[]
+  activities   Activity[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId])
+  @@map("projects")
+}
+
+model Column {
+  id           String   @id @default(cuid())
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name         String
+  position     Int      @default(0)
+  color        String?  @default("#94a3b8")
+  isDoneColumn Boolean  @default(false)
+  tasks        Task[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([projectId, position])
+  @@map("columns")
+}
+
+model Task {
+  id               String          @id @default(cuid())
+  taskNumber       Int             @default(autoincrement())
+  workspaceId      String
+  workspace        Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId        String
+  project          Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  columnId         String
+  column           Column          @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  title            String
+  description      String?         // Rich Markdown
+  priority         Priority        @default(NONE)
+  assigneeId       String?         // jprOS user ID
+  assigneeName     String?
+  assigneeAvatar   String?
+  position         Int             @default(0)
+  startDate        DateTime?
+  dueDate          DateTime?
+  estimatedHours   Float?
+  tags             String[]        @default([])
+  isArchived       Boolean         @default(false)
+
+  // Client Validation / Approval
+  approvalStatus   ApprovalStatus  @default(NONE)
+  approvalToken    String?         @unique
+  approvalPin      String?
+  approvalFeedback String?
+  approvedAt       DateTime?
+  approvedIp       String?
+
+  subtasks         Subtask[]
+  relationsFrom    TaskRelation[]  @relation("RelationsFrom")
+  relationsTo      TaskRelation[]  @relation("RelationsTo")
+  resources        TaskResource[]
+  timeEntries      TimeEntry[]
+  comments         Comment[]
+  activities       Activity[]
+  notifications    Notification[]
+  fieldValues      CustomFieldValue[]
+
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@index([workspaceId])
+  @@index([projectId, columnId, position])
+  @@index([assigneeId])
+  @@index([approvalToken])
+  @@map("tasks")
+}
+
+model Subtask {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  title     String
+  completed Boolean  @default(false)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([taskId, position])
+  @@map("subtasks")
+}
+
+model TaskRelation {
+  id            String       @id @default(cuid())
+  taskId        String
+  task          Task         @relation("RelationsFrom", fields: [taskId], references: [id], onDelete: Cascade)
+  relatedTaskId String
+  relatedTask   Task         @relation("RelationsTo", fields: [relatedTaskId], references: [id], onDelete: Cascade)
+  type          RelationType @default(RELATES_TO)
+  createdAt     DateTime     @default(now())
+
+  @@unique([taskId, relatedTaskId, type])
+  @@index([taskId])
+  @@index([relatedTaskId])
+  @@map("task_relations")
+}
+
+model TaskResource {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  title     String
+  url       String
+  type      String   @default("other") // figma, drive, github, doc, other
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+  @@map("task_resources")
+}
+
+model TimeEntry {
+  id              String   @id @default(cuid())
+  taskId          String
+  task            Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId          String
+  userName        String
+  description     String?
+  durationMinutes Int      @default(0)
+  date            DateTime @default(now())
+  createdAt       DateTime @default(now())
+
+  @@index([taskId])
+  @@index([userId])
+  @@map("time_entries")
+}
+
+model Comment {
+  id         String   @id @default(cuid())
+  taskId     String
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId     String
+  userName   String
+  userAvatar String?
+  content    String   // Markdown with @mentions
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([taskId])
+  @@map("comments")
+}
+
+model Activity {
+  id          String     @id @default(cuid())
+  workspaceId String
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId   String?
+  project     Project?   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskId      String?
+  task        Task?      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId      String
+  userName    String
+  action      String     // created, updated, status_changed, comment_added, approved, etc.
+  details     Json?      // Old and new values or metadata
+  createdAt   DateTime   @default(now())
+
+  @@index([workspaceId, createdAt])
+  @@index([taskId])
+  @@map("activities")
+}
+
+model Notification {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String    // Target user
+  taskId      String?
+  task        Task?     @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  title       String
+  content     String
+  type        String    @default("task") // approval_request, changes_requested, approved, mention, assignment
+  isRead      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  @@index([workspaceId, userId, isRead])
+  @@map("notifications")
+}
+
+model CustomField {
+  id        String             @id @default(cuid())
+  projectId String
+  project   Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  type      String             @default("text") // text, number, select, date
+  options   String[]           @default([])
+  values    CustomFieldValue[]
+  createdAt DateTime           @default(now())
+
+  @@index([projectId])
+  @@map("custom_fields")
+}
+
+model CustomFieldValue {
+  id        String      @id @default(cuid())
+  taskId    String
+  task      Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  fieldId   String
+  field     CustomField @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  value     String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@unique([taskId, fieldId])
+  @@map("custom_field_values")
+}
