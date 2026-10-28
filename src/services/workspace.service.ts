@@ -1,6 +1,13 @@
 import prisma from '../db/prisma.js';
 import { WorkspaceRole } from '@prisma/client';
 import { ActivityService } from './activity.service.js';
+import { AccessService } from './access.service.js';
+import { ShareService } from './share.service.js';
+import { Actor } from '../types/auth.js';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../errors/app-error.js';
+import { parsePaginationParams, buildCursorResponse } from '../utils/pagination.js';
+import { isValidIanaTimezone } from '../utils/dates.js';
+import { withWorkspaceLock } from '../db/tx.js';
 
 function slugify(text: string): string {
   return text
@@ -14,9 +21,15 @@ function slugify(text: string): string {
 }
 
 export class WorkspaceService {
-  static async listUserWorkspaces(user: { id: string; email: string; name: string }) {
-    let memberships = await prisma.workspaceMember.findMany({
-      where: { userId: user.id },
+  /**
+   * Lista apenas os workspaces dos quais o usuário é membro ativo (S6 / Leitura pura).
+   * Sem auto-bootstrap de workspaces em leituras.
+   */
+  static async listUserWorkspaces(actor: Actor) {
+    if (actor.type !== 'user') return [];
+
+    const memberships = await prisma.workspaceMember.findMany({
+      where: { userId: actor.id },
       include: {
         workspace: {
           include: {
@@ -33,51 +46,25 @@ export class WorkspaceService {
       orderBy: { createdAt: 'asc' },
     });
 
-    // If user has no workspaces, bootstrap a default workspace for them
-    if (memberships.length === 0) {
-      const defaultWorkspace = await this.createWorkspace(
-        {
-          name: 'Operação Principal',
-          description: 'Workspace principal para projetos e demandas',
-          color: '#3b82f6',
-        },
-        user
-      );
-
-      const createdMembership = await prisma.workspaceMember.findUnique({
-        where: {
-          workspaceId_userId: {
-            workspaceId: defaultWorkspace.id,
-            userId: user.id,
-          },
-        },
-        include: {
-          workspace: {
-            include: {
-              _count: {
-                select: {
-                  projects: true,
-                  members: true,
-                  tasks: true,
-                },
-              },
-            },
-          },
-        },
-      });
-
-      if (createdMembership) {
-        return [createdMembership.workspace];
-      }
-    }
-
     return memberships.map((m) => m.workspace);
   }
 
+  /**
+   * Criação explícita de workspace. Criador vira ADMIN na mesma transação.
+   */
   static async createWorkspace(
-    data: { name: string; description?: string; color?: string; avatarUrl?: string },
-    user: { id: string; email: string; name: string }
+    data: { name: string; description?: string; color?: string; avatarUrl?: string; timezone?: string },
+    actor: Actor
   ) {
+    if (actor.type !== 'user') {
+      throw new ForbiddenError('Apenas usuários podem criar workspaces.');
+    }
+
+    const timezone = data.timezone ? data.timezone.trim() : 'America/Sao_Paulo';
+    if (!isValidIanaTimezone(timezone)) {
+      throw new ValidationError(`Identificador de fuso horário IANA inválido: "${data.timezone}". Exemplo: "America/Sao_Paulo".`);
+    }
+
     let slug = slugify(data.name);
     let count = 1;
     while (await prisma.workspace.findUnique({ where: { slug } })) {
@@ -91,11 +78,12 @@ export class WorkspaceService {
         description: data.description,
         color: data.color || '#3b82f6',
         avatarUrl: data.avatarUrl,
+        timezone,
         members: {
           create: {
-            userId: user.id,
-            email: user.email,
-            name: user.name,
+            userId: actor.id,
+            email: actor.email,
+            name: actor.name,
             role: WorkspaceRole.ADMIN,
           },
         },
@@ -104,8 +92,8 @@ export class WorkspaceService {
 
     await ActivityService.log({
       workspaceId: workspace.id,
-      userId: user.id,
-      userName: user.name,
+      userId: actor.id,
+      userName: actor.name,
       action: 'created_workspace',
       details: { workspaceName: workspace.name },
     });
@@ -113,10 +101,10 @@ export class WorkspaceService {
     return workspace;
   }
 
-  static async getWorkspace(id: string) {
-    return prisma.workspace.findFirst({
+  static async getWorkspace(idOrSlug: string, actor: Actor) {
+    const workspace = await prisma.workspace.findFirst({
       where: {
-        OR: [{ id }, { slug: id }],
+        OR: [{ id: idOrSlug }, { slug: idOrSlug }],
       },
       include: {
         members: true,
@@ -125,83 +113,306 @@ export class WorkspaceService {
         },
       },
     });
+
+    if (!workspace) {
+      throw new NotFoundError('Workspace não encontrado.');
+    }
+
+    await AccessService.assertCan(actor, 'read_workspace', { workspaceId: workspace.id });
+    return workspace;
   }
 
   static async updateWorkspace(
     id: string,
-    data: { name?: string; description?: string; color?: string; avatarUrl?: string }
+    data: { name?: string; description?: string; color?: string; avatarUrl?: string; timezone?: string },
+    actor: Actor
   ) {
-    return prisma.workspace.update({
+    const workspace = await prisma.workspace.findUnique({ where: { id } });
+    if (!workspace) throw new NotFoundError('Workspace não encontrado.');
+
+    await AccessService.assertCan(actor, 'manage_workspace', { workspaceId: workspace.id });
+
+    if (data.timezone !== undefined) {
+      if (!isValidIanaTimezone(data.timezone)) {
+        throw new ValidationError(`Identificador de fuso horário IANA inválido: "${data.timezone}". Exemplo: "America/Sao_Paulo".`);
+      }
+    }
+
+    const updated = await prisma.workspace.update({
       where: { id },
-      data,
+      data: {
+        name: data.name,
+        description: data.description,
+        color: data.color,
+        avatarUrl: data.avatarUrl,
+        timezone: data.timezone ? data.timezone.trim() : undefined,
+      },
     });
+
+    await ActivityService.log({
+      workspaceId: id,
+      userId: actor.id,
+      userName: (actor as any).name || 'Usuário',
+      action: 'updated_workspace',
+      details: { name: updated.name },
+    });
+
+    return updated;
   }
 
-  static async deleteWorkspace(id: string) {
-    return prisma.workspace.delete({
+  static async archiveWorkspace(id: string, actor: Actor) {
+    const workspace = await prisma.workspace.findUnique({ where: { id } });
+    if (!workspace) throw new NotFoundError('Workspace não encontrado.');
+
+    await AccessService.assertCan(actor, 'archive_workspace', { workspaceId: workspace.id });
+    await ShareService.revokeSharesForScope({ workspaceId: id });
+
+    const updated = await prisma.workspace.update({
       where: { id },
+      data: {
+        isArchived: true,
+        archivedAt: new Date(),
+        archivedById: actor.id,
+      },
     });
+
+    await ActivityService.log({
+      workspaceId: id,
+      actor,
+      action: 'workspace.archived',
+      details: { name: updated.name },
+    });
+
+    return updated;
   }
 
-  static async listMembers(workspaceId: string) {
-    return prisma.workspaceMember.findMany({
+  static async restoreWorkspace(id: string, actor: Actor) {
+    const workspace = await prisma.workspace.findUnique({ where: { id } });
+    if (!workspace) throw new NotFoundError('Workspace não encontrado.');
+
+    await AccessService.assertCan(actor, 'restore_workspace', { workspaceId: workspace.id });
+
+    const updated = await prisma.workspace.update({
+      where: { id },
+      data: {
+        isArchived: false,
+        archivedAt: null,
+        archivedById: null,
+        deletedAt: null,
+        deletedById: null,
+        deletionReason: null,
+      },
+    });
+
+    await ActivityService.log({
+      workspaceId: id,
+      actor,
+      action: 'workspace.restored',
+      details: { name: updated.name },
+    });
+
+    return updated;
+  }
+
+  static async deleteWorkspace(id: string, actor: Actor, reason?: string) {
+    const workspace = await prisma.workspace.findUnique({ where: { id } });
+    if (!workspace) throw new NotFoundError('Workspace não encontrado.');
+
+    await AccessService.assertCan(actor, 'delete_workspace', { workspaceId: workspace.id });
+    await ShareService.revokeSharesForScope({ workspaceId: id });
+
+    const deleted = await prisma.workspace.update({
+      where: { id },
+      data: {
+        deletedAt: new Date(),
+        deletedById: actor.id,
+        deletionReason: reason || null,
+      },
+    });
+
+    await ActivityService.log({
+      workspaceId: id,
+      actor,
+      action: 'workspace.deleted',
+      details: { name: deleted.name, reason },
+    });
+
+    return deleted;
+  }
+
+  static async listMembers(
+    workspaceId: string,
+    actor: Actor,
+    paginationQuery: { cursor?: string; limit?: string | number } = {}
+  ) {
+    await AccessService.assertCan(actor, 'read_workspace', { workspaceId });
+
+    const { cursor, limit } = parsePaginationParams(paginationQuery);
+
+    const members = await prisma.workspaceMember.findMany({
       where: { workspaceId },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: limit + 1,
+      cursor: cursor ? { id: cursor } : undefined,
+      skip: cursor ? 1 : 0,
     });
+
+    return buildCursorResponse(members, limit);
   }
 
   static async addMember(
     workspaceId: string,
     data: { userId: string; email: string; name: string; role?: WorkspaceRole; avatarUrl?: string },
-    actor: { id: string; name: string }
+    actor: Actor
   ) {
-    const member = await prisma.workspaceMember.upsert({
-      where: {
-        workspaceId_userId: {
+    await AccessService.assertCan(actor, 'manage_members', { workspaceId });
+
+    return withWorkspaceLock(workspaceId, async (tx) => {
+      // Verifica se já existe para evitar rebaixamento silencioso (X12 / E1.6-d)
+      const existing = await tx.workspaceMember.findUnique({
+        where: {
+          workspaceId_userId: {
+            workspaceId,
+            userId: data.userId,
+          },
+        },
+      });
+
+      if (existing) {
+        throw new ConflictError('Usuário já é membro deste workspace.');
+      }
+
+      const member = await tx.workspaceMember.create({
+        data: {
           workspaceId,
           userId: data.userId,
+          email: data.email,
+          name: data.name,
+          role: data.role || WorkspaceRole.MEMBER,
+          avatarUrl: data.avatarUrl,
         },
-      },
-      update: {
-        role: data.role || WorkspaceRole.MEMBER,
-        name: data.name,
-        email: data.email,
-        avatarUrl: data.avatarUrl,
-      },
-      create: {
-        workspaceId,
-        userId: data.userId,
-        email: data.email,
-        name: data.name,
-        role: data.role || WorkspaceRole.MEMBER,
-        avatarUrl: data.avatarUrl,
-      },
-    });
+      });
 
-    await ActivityService.log({
-      workspaceId,
-      userId: actor.id,
-      userName: actor.name,
-      action: 'added_member',
-      details: { memberName: data.name, memberRole: member.role },
-    });
+      await ActivityService.log(
+        {
+          workspaceId,
+          userId: actor.id,
+          userName: (actor as any).name || 'Usuário',
+          action: 'added_member',
+          details: { memberName: data.name, memberRole: member.role },
+        },
+        tx
+      );
 
-    return member;
+      return member;
+    });
   }
 
-  static async removeMember(workspaceId: string, memberId: string, actor: { id: string; name: string }) {
-    const member = await prisma.workspaceMember.delete({
-      where: { id: memberId },
-    });
+  static async updateMemberRole(
+    workspaceId: string,
+    memberId: string,
+    newRole: WorkspaceRole,
+    actor: Actor
+  ) {
+    await AccessService.assertCan(actor, 'manage_members', { workspaceId });
 
-    await ActivityService.log({
-      workspaceId,
-      userId: actor.id,
-      userName: actor.name,
-      action: 'removed_member',
-      details: { memberName: member.name },
-    });
+    return withWorkspaceLock(workspaceId, async (tx) => {
+      const member = await tx.workspaceMember.findUnique({
+        where: { id: memberId },
+      });
 
-    return member;
+      if (!member || member.workspaceId !== workspaceId) {
+        throw new NotFoundError('Membro não encontrado neste workspace.');
+      }
+
+      // Impede rebaixar o único ADMIN do workspace (E3.5-f / T05)
+      if (member.role === WorkspaceRole.ADMIN && newRole !== WorkspaceRole.ADMIN) {
+        const adminCount = await tx.workspaceMember.count({
+          where: {
+            workspaceId,
+            role: WorkspaceRole.ADMIN,
+            status: 'ACTIVE',
+          },
+        });
+
+        if (adminCount <= 1) {
+          throw new ForbiddenError(
+            'Não é permitido rebaixar o único administrador do workspace. Promova outro membro a ADMIN antes.'
+          );
+        }
+      }
+
+      const updated = await tx.workspaceMember.update({
+        where: { id: memberId },
+        data: { role: newRole },
+      });
+
+      if (newRole === WorkspaceRole.VIEWER && member.role !== WorkspaceRole.VIEWER) {
+        await ShareService.revokeSharesForScope({ workspaceId, userId: member.userId });
+      }
+
+      await ActivityService.log(
+        {
+          workspaceId,
+          userId: actor.id,
+          userName: (actor as any).name || 'Usuário',
+          action: 'updated_member_role',
+          details: { memberName: member.name, oldRole: member.role, newRole },
+        },
+        tx
+      );
+
+      return updated;
+    });
+  }
+
+  static async removeMember(workspaceId: string, memberId: string, actor: Actor) {
+    await AccessService.assertCan(actor, 'manage_members', { workspaceId });
+
+    return withWorkspaceLock(workspaceId, async (tx) => {
+      const member = await tx.workspaceMember.findUnique({
+        where: { id: memberId },
+      });
+
+      if (!member || member.workspaceId !== workspaceId) {
+        throw new NotFoundError('Membro não encontrado neste workspace.');
+      }
+
+      // Impede a remoção do último ADMIN (Seção 3.4 / E1.6-d / E3.5-f)
+      if (member.role === WorkspaceRole.ADMIN) {
+        const adminCount = await tx.workspaceMember.count({
+          where: {
+            workspaceId,
+            role: WorkspaceRole.ADMIN,
+            status: 'ACTIVE',
+          },
+        });
+
+        if (adminCount <= 1) {
+          throw new ForbiddenError(
+            'Não é permitido remover o único administrador do workspace. Promova outro membro a ADMIN antes.'
+          );
+        }
+      }
+
+      await ShareService.revokeSharesForScope({ workspaceId, userId: member.userId });
+
+      const deleted = await tx.workspaceMember.delete({
+        where: { id: memberId },
+      });
+
+      await ActivityService.log(
+        {
+          workspaceId,
+          userId: actor.id,
+          userName: (actor as any).name || 'Usuário',
+          action: 'removed_member',
+          details: { memberName: member.name },
+        },
+        tx
+      );
+
+      return deleted;
+    });
   }
 }

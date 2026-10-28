@@ -41,11 +41,25 @@ model Workspace {
   description String?
   color       String?           @default("#3b82f6")
   avatarUrl   String?
+  timezone    String            @default("America/Sao_Paulo")
+  isArchived  Boolean           @default(false)
+  archivedAt  DateTime?
+  archivedById String?
+  deletedAt   DateTime?
+  deletedById String?
+  deletionReason String?
   members     WorkspaceMember[]
   projects    Project[]
   activities  Activity[]
   notifications Notification[]
   tasks       Task[]
+  grants      IntegrationGrant[]
+  shares      TaskShare[]
+  labels      Label[]
+  attachments Attachment[]
+  contactLinks WorkspaceContactLink[]
+  inboxRoutes  WorkspaceInboxRoute[]
+  conversationContexts ConversationProjectContext[]
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
 
@@ -61,12 +75,14 @@ model WorkspaceMember {
   name        String
   avatarUrl   String?
   role        WorkspaceRole @default(MEMBER)
+  status      String        @default("ACTIVE") // ACTIVE, PENDING, INACTIVE (E1.6-f)
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
   @@unique([workspaceId, userId])
   @@index([workspaceId])
   @@index([userId])
+  @@index([status])
   @@map("workspace_members")
 }
 
@@ -74,20 +90,31 @@ model Project {
   id           String        @id @default(cuid())
   workspaceId  String
   workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name         String
-  slug         String
-  description  String?
-  color        String?       @default("#6366f1")
-  icon         String?       @default("folder")
-  isArchived   Boolean       @default(false)
-  columns      Column[]
-  tasks        Task[]
-  customFields CustomField[]
-  activities   Activity[]
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  name            String
+  slug            String
+  key             String        @default("PROJ")
+  taskCounter     Int           @default(0)
+  backlogColumnId String?
+  description     String?
+  color           String?       @default("#6366f1")
+  icon            String?       @default("folder")
+  isArchived      Boolean       @default(false)
+  archivedAt      DateTime?
+  archivedById    String?
+  deletedAt       DateTime?
+  deletedById     String?
+  deletionReason  String?
+  columns         Column[]
+  tasks           Task[]
+  customFields    CustomField[]
+  conversationContexts ConversationProjectContext[]
+  activities      Activity[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
   @@unique([workspaceId, slug])
+  @@unique([workspaceId, key])
+  @@unique([id, workspaceId])
   @@index([workspaceId])
   @@map("projects")
 }
@@ -98,25 +125,28 @@ model Column {
   project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   name         String
   position     Int      @default(0)
+  orderVersion Int      @default(1)
   color        String?  @default("#94a3b8")
   isDoneColumn Boolean  @default(false)
   tasks        Task[]
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  @@unique([id, projectId])
   @@index([projectId, position])
   @@map("columns")
 }
 
 model Task {
   id               String          @id @default(cuid())
-  taskNumber       Int             @default(autoincrement())
+  taskNumber       Int
+  version          Int             @default(1)
   workspaceId      String
   workspace        Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   projectId        String
-  project          Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project          Project         @relation(fields: [projectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   columnId         String
-  column           Column          @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  column           Column          @relation(fields: [columnId, projectId], references: [id, projectId], onDelete: Restrict)
   title            String
   description      String?         // Rich Markdown
   priority         Priority        @default(NONE)
@@ -124,11 +154,16 @@ model Task {
   assigneeName     String?
   assigneeAvatar   String?
   position         Int             @default(0)
-  startDate        DateTime?
-  dueDate          DateTime?
-  estimatedHours   Float?
+  startDate        DateTime?       @db.Date
+  dueDate          DateTime?       @db.Date
+  estimatedMinutes Int?
   tags             String[]        @default([])
   isArchived       Boolean         @default(false)
+  archivedAt       DateTime?
+  archivedById     String?
+  deletedAt        DateTime?
+  deletedById      String?
+  deletionReason   String?
 
   // Client Validation / Approval
   approvalStatus   ApprovalStatus  @default(NONE)
@@ -147,15 +182,51 @@ model Task {
   activities       Activity[]
   notifications    Notification[]
   fieldValues      CustomFieldValue[]
+  shares           TaskShare[]
+  labels           TaskLabel[]
+  attachments      Attachment[]
+  crmLink          TaskCrmLink?
 
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
 
+  @@unique([projectId, taskNumber])
+  @@unique([id, projectId])
+  @@unique([id, workspaceId])
   @@index([workspaceId])
   @@index([projectId, columnId, position])
   @@index([assigneeId])
   @@index([approvalToken])
   @@map("tasks")
+}
+
+model Label {
+  id             String      @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name           String
+  normalizedName String
+  color          String      @default("#64748b")
+  taskLabels     TaskLabel[]
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@unique([workspaceId, normalizedName])
+  @@index([workspaceId])
+  @@map("labels")
+}
+
+model TaskLabel {
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  labelId   String
+  label     Label    @relation(fields: [labelId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([taskId, labelId])
+  @@index([taskId])
+  @@index([labelId])
+  @@map("task_labels")
 }
 
 model Subtask {
@@ -194,6 +265,7 @@ model TaskResource {
   title     String
   url       String
   type      String   @default("other") // figma, drive, github, doc, other
+  shareResources TaskShareResource[]
   createdAt DateTime @default(now())
 
   @@index([taskId])
@@ -217,36 +289,56 @@ model TimeEntry {
 }
 
 model Comment {
-  id         String   @id @default(cuid())
+  id         String           @id @default(cuid())
   taskId     String
-  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  task       Task             @relation(fields: [taskId], references: [id], onDelete: Cascade)
   userId     String
   userName   String
   userAvatar String?
-  content    String   // Markdown with @mentions
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  content    String           // Markdown with @mentions
+  mentions   CommentMention[]
+  attachments Attachment[]
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
 
   @@index([taskId])
   @@map("comments")
 }
 
+model CommentMention {
+  id        String   @id @default(cuid())
+  commentId String
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String   // ID do membro mencionado no workspace
+  createdAt DateTime @default(now())
+
+  @@unique([commentId, userId])
+  @@index([userId])
+  @@map("comment_mentions")
+}
+
 model Activity {
-  id          String     @id @default(cuid())
-  workspaceId String
-  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  projectId   String?
-  project     Project?   @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  taskId      String?
-  task        Task?      @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  userId      String
-  userName    String
-  action      String     // created, updated, status_changed, comment_added, approved, etc.
-  details     Json?      // Old and new values or metadata
-  createdAt   DateTime   @default(now())
+  id                String     @id @default(cuid())
+  workspaceId       String?
+  workspace         Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  projectId         String?
+  project           Project?   @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  taskId            String?
+  task              Task?      @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  actorType         String     @default("USER") // USER | SERVICE
+  actorId           String     @default("system")
+  userId            String?    // Compatibilidade histórica
+  userName          String     // Nome histórico do ator
+  initiatedByUserId String?    // Usuário delegador quando chamado por serviço/automação
+  requestId         String?    // Correlação da requisição
+  action            String     // created, updated, status_changed, comment_added, approved, etc.
+  details           Json?      // Old and new values or metadata
+  createdAt         DateTime   @default(now())
 
   @@index([workspaceId, createdAt])
   @@index([taskId])
+  @@index([projectId])
+  @@index([actorId])
   @@map("activities")
 }
 
@@ -259,23 +351,29 @@ model Notification {
   task        Task?     @relation(fields: [taskId], references: [id], onDelete: SetNull)
   title       String
   content     String
-  type        String    @default("task") // approval_request, changes_requested, approved, mention, assignment
+  type        String    @default("task") // mention, assignment, comment, etc.
   isRead      Boolean   @default(false)
+  archivedAt  DateTime?
+  dedupKey    String?
   createdAt   DateTime  @default(now())
 
-  @@index([workspaceId, userId, isRead])
+  @@unique([workspaceId, userId, dedupKey])
+  @@index([workspaceId, userId, isRead, archivedAt])
   @@map("notifications")
 }
 
 model CustomField {
-  id        String             @id @default(cuid())
-  projectId String
-  project   Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  name      String
-  type      String             @default("text") // text, number, select, date
-  options   String[]           @default([])
-  values    CustomFieldValue[]
-  createdAt DateTime           @default(now())
+  id                String                  @id @default(cuid())
+  projectId         String
+  project           Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name              String
+  type              String                  @default("text") // text, number, select, date
+  options           Json?                   @default("[]")   // [{ id, label, color }] para opções com identidade estável
+  isPublicEligible  Boolean                 @default(false)  // Elegibilidade ao cliente (somente ADMIN pode alterar)
+  values            CustomFieldValue[]
+  shareCustomFields TaskShareCustomField[]
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt @default(now())
 
   @@index([projectId])
   @@map("custom_fields")
@@ -292,5 +390,313 @@ model CustomFieldValue {
   updatedAt DateTime    @updatedAt
 
   @@unique([taskId, fieldId])
+  @@index([fieldId])
   @@map("custom_field_values")
 }
+
+model LegacyTaskApprovalArchive {
+  id             String         @id @default(cuid())
+  taskId         String         @unique
+  taskNumber     Int
+  workspaceId    String
+  projectId      String
+  approvalStatus ApprovalStatus @default(NONE)
+  tokenHash      String?
+  pinHash        String?
+  feedback       String?
+  approvedAt     DateTime?
+  approvedIp     String?
+  archivedAt     DateTime       @default(now())
+
+  @@index([workspaceId])
+  @@index([projectId])
+  @@map("legacy_task_approval_archive")
+}
+
+model UserProjection {
+  id        String   @id // Canonical User UUID from evo-auth
+  email     String
+  name      String
+  avatarUrl String?
+  isActive  Boolean  @default(true)
+  syncedAt  DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@index([isActive])
+  @@map("user_projections")
+}
+
+model ServicePrincipal {
+  id          String              @id @default(cuid())
+  name        String
+  description String?
+  isActive    Boolean             @default(true)
+  credentials ServiceCredential[]
+  grants      IntegrationGrant[]
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@map("service_principals")
+}
+
+model ServiceCredential {
+  id          String           @id @default(cuid())
+  principalId String
+  principal   ServicePrincipal @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  keyPrefix   String           // Prefix público da chave para identificação (ex: "sp_live_...")
+  secretHash  String           // Hash seguro (SHA-256 ou Argon2id) do segredo de alta entropia
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime         @default(now())
+
+  @@index([principalId])
+  @@index([keyPrefix])
+  @@map("service_credentials")
+}
+
+model IntegrationGrant {
+  id            String           @id @default(cuid())
+  principalId   String
+  principal     ServicePrincipal @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  workspaceId   String
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId     String?
+  tools         String[]         @default([]) // Ferramentas autorizadas (ex: ["list_tasks", "create_task"])
+  allowedFields String[]         @default([]) // Campos autorizados para escrita
+  mode          String           @default("internal") // internal, customer_support
+  canShare      Boolean          @default(false)
+  expiresAt     DateTime?
+  revokedAt     DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([principalId])
+  @@index([workspaceId])
+  @@map("integration_grants")
+}
+
+// -----------------------------------------------------------------------------
+// Phase 2: Secure Public Task Sharing (E2.1)
+// -----------------------------------------------------------------------------
+
+model TaskShare {
+  id                     String              @id @default(cuid())
+  workspaceId            String
+  workspace              Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  taskId                 String
+  task                   Task                @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tokenHash              String              @unique
+  pinHash                String
+  createdByActorType     String              // 'USER' | 'SERVICE'
+  createdById            String
+  initiatedByUserId      String?
+  expiresAt              DateTime
+  revokedAt              DateTime?
+  revokedByActor         String?
+  version                Int                 @default(1)
+  showDescription        Boolean             @default(true)
+  showSubtasks           Boolean             @default(true)
+  showResources          Boolean             @default(true)
+  showAttachments        Boolean             @default(true)
+  showCustomFields       Boolean             @default(true)
+  publicContentUpdatedAt DateTime?
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+
+  resources              TaskShareResource[]
+  attachments            TaskShareAttachment[]
+  customFields           TaskShareCustomField[]
+  sessions               TaskShareSession[]
+
+  @@index([workspaceId])
+  @@index([taskId])
+  @@index([expiresAt])
+  @@index([createdById])
+  @@map("task_shares")
+}
+
+model TaskShareResource {
+  id         String       @id @default(cuid())
+  shareId    String
+  share      TaskShare    @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  resourceId String
+  resource   TaskResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  createdAt  DateTime     @default(now())
+
+  @@unique([shareId, resourceId])
+  @@index([shareId])
+  @@index([resourceId])
+  @@map("task_share_resources")
+}
+
+model TaskShareSession {
+  id               String    @id @default(cuid())
+  sessionTokenHash String    @unique
+  shareId          String
+  share            TaskShare @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  ip               String
+  userAgent        String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([shareId])
+  @@index([expiresAt])
+  @@map("task_share_sessions")
+}
+
+model IdempotencyRecord {
+  id           String    @id @default(cuid())
+  scopeKey     String    // "actorId:workspaceId:operation" ou key enviada
+  requestHash  String    // SHA-256 do corpo do pedido
+  statusCode   Int
+  responseJson Json
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+
+  @@unique([scopeKey])
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+// -----------------------------------------------------------------------------
+// Phase 3: Secure Attachments and Sharing (E3.7)
+// -----------------------------------------------------------------------------
+
+model Attachment {
+  id               String                @id @default(cuid())
+  workspaceId      String
+  workspace        Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  taskId           String
+  task             Task                  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  commentId        String?
+  comment          Comment?              @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  storageKey       String                @unique
+  filename         String
+  mimeType         String
+  sizeBytes        Int
+  hashSha256       String
+  uploadedById     String
+  shareAttachments TaskShareAttachment[]
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@index([workspaceId])
+  @@index([taskId])
+  @@index([commentId])
+  @@index([uploadedById])
+  @@map("attachments")
+}
+
+model TaskShareAttachment {
+  id           String     @id @default(cuid())
+  shareId      String
+  share        TaskShare  @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  attachmentId String
+  attachment   Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@unique([shareId, attachmentId])
+  @@index([shareId])
+  @@index([attachmentId])
+  @@map("task_share_attachments")
+}
+
+model TaskShareCustomField {
+  id            String      @id @default(cuid())
+  shareId       String
+  share         TaskShare   @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  customFieldId String
+  customField   CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+
+  @@unique([shareId, customFieldId])
+  @@index([shareId])
+  @@index([customFieldId])
+  @@map("task_share_custom_fields")
+}
+
+// -----------------------------------------------------------------------------
+// Phase 4: CRM Interoperability and Context Resolution (E4.1)
+// -----------------------------------------------------------------------------
+
+model WorkspaceContactLink {
+  id              String    @id @default(cuid())
+  workspaceId     String
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  crmInstanceId   String
+  crmContactId    String
+  contactName     String?
+  contactPhone    String?
+  contactEmail    String?
+  createdByUserId String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([workspaceId, crmInstanceId, crmContactId])
+  @@index([crmInstanceId, crmContactId])
+  @@index([workspaceId])
+  @@map("workspace_contact_links")
+}
+
+model WorkspaceInboxRoute {
+  id              String    @id @default(cuid())
+  workspaceId     String
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  crmInstanceId   String
+  crmInboxId      String
+  inboxName       String?
+  isExclusive     Boolean   @default(true)
+  createdByUserId String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([workspaceId, crmInstanceId, crmInboxId])
+  @@index([crmInstanceId, crmInboxId])
+  @@index([workspaceId])
+  @@map("workspace_inbox_routes")
+}
+
+model ConversationProjectContext {
+  id                String    @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId         String
+  project           Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  crmInstanceId     String
+  crmConversationId String
+  crmContactId      String?
+  active            Boolean   @default(true)
+  expiresAt         DateTime?
+  createdByUserId   String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([crmInstanceId, crmConversationId])
+  @@index([workspaceId])
+  @@index([projectId])
+  @@index([crmInstanceId, crmConversationId])
+  @@map("conversation_project_contexts")
+}
+
+model TaskCrmLink {
+  id                String   @id @default(cuid())
+  taskId            String   @unique
+  task              Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  crmInstanceId     String
+  crmContactId      String
+  crmConversationId String?
+  createdAt         DateTime @default(now())
+
+  @@index([crmInstanceId, crmContactId])
+  @@index([crmInstanceId, crmConversationId])
+  @@map("task_crm_links")
+}
+
+
+
+
+
+

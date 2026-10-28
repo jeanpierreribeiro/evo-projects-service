@@ -1,76 +1,38 @@
 import { FastifyInstance } from 'fastify';
-import { z } from 'zod';
-import { ApprovalService } from '../services/approval.service.js';
 
-const pinSchema = z.object({
-  pin: z.string().min(4, 'PIN deve ter ao menos 4 dígitos'),
-});
-
-const requestChangesSchema = pinSchema.extend({
-  feedback: z.string().min(1, 'Por favor, descreva os ajustes necessários'),
-});
-
+/**
+ * Rotas públicas legadas de aprovação (Contenção E1.2-c)
+ * Todas as ações antigas de aprovação/rejeição/preview retornam 410 LEGACY_FEATURE_REMOVED.
+ * O novo compartilhamento de leitura por PIN será introduzido na Fase 2 (/public/shares/:token/*).
+ */
 export async function publicRoutes(fastify: FastifyInstance) {
-  // GET /public/tasks/:token/preview - Basic preview before entering PIN
-  fastify.get('/public/tasks/:token/preview', async (request, reply) => {
-    const { token } = request.params as { token: string };
-    try {
-      const preview = await ApprovalService.getPublicPreview(token);
-      return { data: preview };
-    } catch (err: any) {
-      return reply.status(404).send({ error: err.message || 'Link inválido' });
-    }
-  });
+  const legacyRemovedHandler = async (request: any, reply: any) => {
+    return reply.status(410).send({
+      code: 'LEGACY_FEATURE_REMOVED',
+      message: 'O portal legado de aprovação foi descontinuado e substituído pelo compartilhamento de leitura.',
+      requestId: request.id,
+    });
+  };
 
-  // POST /public/tasks/:token/validate-pin - Unlock delivery details
-  fastify.post('/public/tasks/:token/validate-pin', async (request, reply) => {
-    const { token } = request.params as { token: string };
-    const parsed = pinSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.issues[0]?.message || 'PIN inválido' });
-    }
+  const routeConfig = {
+    config: {
+      isPublic: true,
+      policy: {
+        action: 'legacy_public_portal',
+        resource: 'legacy_approval',
+      },
+    },
+  };
 
-    try {
-      const details = await ApprovalService.validatePin(token, parsed.data.pin);
-      return { data: details };
-    } catch (err: any) {
-      return reply.status(401).send({ error: err.message || 'PIN incorreto' });
-    }
-  });
+  // GET /public/tasks/:token/preview
+  fastify.get('/public/tasks/:token/preview', routeConfig, legacyRemovedHandler);
 
-  // POST /public/tasks/:token/approve - Approve delivery
-  fastify.post('/public/tasks/:token/approve', async (request, reply) => {
-    const { token } = request.params as { token: string };
-    const clientIp = request.ip || (request.headers['x-forwarded-for'] as string) || 'unknown';
+  // POST /public/tasks/:token/validate-pin
+  fastify.post('/public/tasks/:token/validate-pin', routeConfig, legacyRemovedHandler);
 
-    const parsed = pinSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.issues[0]?.message || 'PIN inválido' });
-    }
+  // POST /public/tasks/:token/approve
+  fastify.post('/public/tasks/:token/approve', routeConfig, legacyRemovedHandler);
 
-    try {
-      const result = await ApprovalService.approve(token, parsed.data.pin, clientIp);
-      return { data: result, message: 'Entrega aprovada com sucesso!' };
-    } catch (err: any) {
-      return reply.status(400).send({ error: err.message || 'Erro ao aprovar entrega' });
-    }
-  });
-
-  // POST /public/tasks/:token/request-changes - Request adjustments
-  fastify.post('/public/tasks/:token/request-changes', async (request, reply) => {
-    const { token } = request.params as { token: string };
-    const clientIp = request.ip || (request.headers['x-forwarded-for'] as string) || 'unknown';
-
-    const parsed = requestChangesSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.issues[0]?.message || 'Dados inválidos' });
-    }
-
-    try {
-      const result = await ApprovalService.requestChanges(token, parsed.data.pin, parsed.data.feedback, clientIp);
-      return { data: result, message: 'Solicitação de ajustes enviada à equipe com sucesso!' };
-    } catch (err: any) {
-      return reply.status(400).send({ error: err.message || 'Erro ao solicitar ajustes' });
-    }
-  });
+  // POST /public/tasks/:token/request-changes
+  fastify.post('/public/tasks/:token/request-changes', routeConfig, legacyRemovedHandler);
 }
