@@ -46,6 +46,31 @@ export class WorkspaceService {
       orderBy: { createdAt: 'asc' },
     });
 
+    if (memberships.length === 0) {
+      try {
+        const defaultWs = await this.createWorkspace(
+          { name: 'Principal', description: 'Workspace principal' },
+          actor
+        );
+        const wsWithCount = await prisma.workspace.findUnique({
+          where: { id: defaultWs.id },
+          include: {
+            _count: {
+              select: {
+                projects: true,
+                members: true,
+                tasks: true,
+              },
+            },
+          },
+        });
+        return wsWithCount ? [wsWithCount] : [defaultWs];
+      } catch (err) {
+        console.error('Falha ao auto-criar workspace padrão:', err);
+        return [];
+      }
+    }
+
     return memberships.map((m) => m.workspace);
   }
 

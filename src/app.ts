@@ -30,7 +30,7 @@ declare module 'fastify' {
 
 export function buildApp() {
   const app = fastify({
-    logger: false,
+    logger: true,
     bodyLimit: 10 * 1024 * 1024, // Limite estrito de 10MB por corpo (E1.8-a)
     trustProxy: ['127.0.0.1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'], // Proxies confiáveis (E1.8-a)
   });
