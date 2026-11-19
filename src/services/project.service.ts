@@ -180,7 +180,15 @@ export class ProjectService {
   }
 
   static async getProject(id: string, actor: Actor, expectedWorkspaceId?: string) {
-    return AccessService.getAuthorizedProject(id, actor, 'read_project', expectedWorkspaceId);
+    const project = await AccessService.getAuthorizedProject(id, actor, 'read_project', expectedWorkspaceId);
+    const columns = await prisma.column.findMany({
+      where: { projectId: project.id },
+      orderBy: { position: 'asc' },
+    });
+    return {
+      ...project,
+      columns,
+    };
   }
 
   static async updateProject(
